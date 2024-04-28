@@ -60,10 +60,13 @@ async def format_not_stream_response(response, prompt_tokens, max_tokens, model)
     }
 
 
-async def wss_stream_response(websocket):
+async def wss_stream_response(ws):
     while True:
         try:
-            message = await asyncio.wait_for(websocket.recv(), timeout=15)
+            async def ws_listen(ws):
+                return await asyncio.get_event_loop().run_in_executor(None, ws.recv)
+
+            message = await ws_listen(ws)
             print(f"message:{message}")
             if message:
                 resultObj = json.loads(message)

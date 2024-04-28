@@ -3,8 +3,8 @@ import random
 import types
 import uuid
 
-import websockets
 from fastapi import HTTPException
+from websocket import create_connection
 
 from api.chat_completions import num_tokens_from_messages, model_proxy
 from chatgpt.chatResponse import api_messages_to_chat, stream_response, wss_stream_response, format_not_stream_response
@@ -12,6 +12,7 @@ from chatgpt.proofofwork import calc_proof_token
 from utils.Client import Client
 from utils.Logger import Logger
 from utils.config import proxy_url_list, chatgpt_base_url_list, arkose_token_url_list, history_disabled
+from utils.proxyFormat import proxy_format
 
 
 class ChatService:
@@ -191,23 +192,40 @@ class ChatService:
             if "text/event-stream" in content_type and stream:
                 return stream_response(self, r.aiter_lines(), model, self.max_tokens)
             elif "text/event-stream" in content_type and not stream:
-                return await format_not_stream_response(stream_response(self, r.aiter_lines(), model, self.max_tokens), self.prompt_tokens, self.max_tokens, model)
+                return await format_not_stream_response(stream_response(self, r.aiter_lines(), model, self.max_tokens),
+                                                        self.prompt_tokens, self.max_tokens, model)
             elif "application/json" in content_type:
                 rtext = await r.atext()
                 detail = json.loads(rtext).get("detail", json.loads(rtext))
                 wss_url = detail.get('wss_url')
                 Logger.info(f"wss_url: {wss_url}")
                 subprotocols = ["json.reliable.webpubsub.azure.v1"]
+                proxy_formatted = proxy_format(self.proxy_url)
+                cookies = dict(self.s.cookies)
+                wss_headers = {'Origin': 'wss://chatgpt-async-webps-prod-centralus-5.chatgpt.com',
+                               'Referer': 'wss://chatgpt-async-webps-prod-centralus-5.chatgpt.com/',
+                               'Cookie': "; ".join([f"{k}={v}" for k, v in cookies.items()])}
+                print(wss_headers)
                 try:
-                    async with websockets.connect(wss_url, ping_interval=None, subprotocols=subprotocols) as websocket:
-                        wss_r = wss_stream_response(websocket)
-                except websockets.exceptions.InvalidStatusCode as e:
-                    Logger.error(f"Invalid status code: {str(e)}")
-                    raise HTTPException(status_code=e.status_code, detail=str(e))
+                    ws = await create_connection(
+                        wss_url,
+                        ping_interval=None,
+                        subprotocols=subprotocols,
+                        http_proxy_host=proxy_formatted.http_proxy_host,
+                        http_proxy_port=proxy_formatted.http_proxy_port,
+                        proxy_type=proxy_formatted.proxy_type,
+                        http_proxy_auth=(proxy_formatted.proxy_username, proxy_formatted.proxy_password),
+                        header=wss_headers,
+                        suppress_origin=True
+                    )
+                    wss_r = wss_stream_response(ws)
+                except Exception as e:
+                    raise HTTPException(status_code=403, detail=f"Failed to connect to wss_url: {e}")
                 if stream and isinstance(wss_r, types.AsyncGeneratorType):
                     return stream_response(self, wss_r, model, self.max_tokens)
                 else:
-                    return await format_not_stream_response(stream_response(self, wss_r, model, self.max_tokens), self.prompt_tokens, self.max_tokens, model)
+                    return await format_not_stream_response(stream_response(self, wss_r, model, self.max_tokens),
+                                                            self.prompt_tokens, self.max_tokens, model)
             else:
                 raise HTTPException(status_code=r.status_code, detail="Unsupported Content-Type")
         except HTTPException as e:
